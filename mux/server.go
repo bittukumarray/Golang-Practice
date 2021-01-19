@@ -3,7 +3,6 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -90,42 +89,44 @@ func GetCustomerData(db *sql.DB, id int) Customer {
 }
 
 func GetCustomerHandler(w http.ResponseWriter, r *http.Request) {
-	//pathparams := mux.Vars(r)
-	//
-	//var c Customer
-	//id, err := strconv.Atoi(pathparams["id"])
+	pathparams := mux.Vars(r)
 
-	pathParams, err := strconv.Atoi(strings.Split(r.URL.Path, "/")[2])
 	var c Customer
+	id, err := strconv.Atoi(pathparams["id"])
+
+	//pathParams, err := strconv.Atoi(strings.Split(r.URL.Path, "/")[2])
 	if err != nil {
 		log.Fatal(err)
 	}
-	c = GetCustomerData(db, pathParams)
+	c = GetCustomerData(db, id)
 
 	json.NewEncoder(w).Encode(c)
 }
 
 func InsertCustomerData(db *sql.DB, obj Customer) Customer {
-	_, err := db.Query("insert into Atable (name) values (?)", "Ray")
-
-	if err != nil {
-		log.Fatal(err)
-		return Customer{}
-	}
-	id, err := db.Query("SELECT LAST_INSERT_ID();")
+	rows, err := db.Exec("insert into cust (name, dob) values (?, ?)", obj.Name, obj.Dob)
 
 	if err != nil {
 		log.Fatal(err)
 		return Customer{}
 	}
 
-	var ID int
-	for id.Next() {
-		id.Scan(&ID)
+	id, err1 := rows.LastInsertId()
 
-		fmt.Println(ID)
+	if err1 != nil {
+		log.Fatal(err1)
+		return Customer{}
+	} else {
+		rows, err = db.Exec("insert into addrs (streetname, city, state, cus_id) values (?, ?, ?, ?)", obj.Address.StreetName, obj.Address.City, obj.Address.State, id)
+		if err == nil {
+			obj.Id = int(id)
+			addressId, _ := rows.LastInsertId()
+			obj.Address.Id = int(addressId)
+			obj.Address.CusId = int(id)
+			return obj
+		}
 	}
-	fmt.Println("new id is ", ID)
+
 	return Customer{}
 }
 
@@ -136,7 +137,8 @@ func DateSubstract(d1 string) int {
 	myDate, err := time.Parse("2006-01-02", newDate)
 
 	if err != nil {
-		panic(err)
+		//panic(err)
+		return 0
 	}
 
 	return int(time.Now().Unix() - myDate.Unix())
@@ -144,38 +146,75 @@ func DateSubstract(d1 string) int {
 
 func PostCustomerHandler(w http.ResponseWriter, r *http.Request) {
 	body, err := ioutil.ReadAll(r.Body)
-	x := time.Now().Unix()
-	fmt.Println(x)
 	if err != nil {
 		log.Fatal(err)
 	}
 	var cust Customer
 	err = json.Unmarshal(body, &cust)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if cust.Name == "" || cust.Dob == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(Customer{})
+	} else if timestamp := DateSubstract(cust.Dob); timestamp/(3600*24*12*30) < 18 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(Customer{})
+	} else {
+		cust = InsertCustomerData(db, cust)
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(cust)
+	}
+}
+
+func UpdateData(db *sql.DB, id int, c Customer) Customer {
+
+	if c.Name != "" {
+		_, err := db.Exec("update cust set name=? where id=?", c.Name, id)
+		if err != nil {
+			log.Fatal(err)
+			return Customer{}
+		}
+	}
+	var data []interface{}
+	query := "update addrs set "
+	if c.Address.State != "" {
+		query += "state = ? ,"
+		data = append(data, c.Address.State)
+	}
+	if c.Address.City != "" {
+		query += "city = ? ,"
+		data = append(data, c.Address.City)
+	}
+	if c.Address.StreetName != "" {
+		query += "streetname = ? ,"
+		data = append(data, c.Address.StreetName)
+	}
+	query = query[:len(query)-1]
+	query += "where cus_id = ? and id = ?"
+	data = append(data, id)
+	data = append(data, c.Address.Id)
+
+	_, err := db.Exec(query, data...)
 
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	//fmt.Println("cust is ", cust)
-	timestamp := DateSubstract(cust.Dob)
-
-	if timestamp/(3600*24*12*30) < 18 {
-		json.NewEncoder(w).Encode(Customer{})
-	} else {
-		InsertCustomerData(db, cust)
+	rows, _ := db.Query("select * from cust inner join addrs on cust.id=addrs.cus_id and addrs.id=? and cust.id=?", c.Address.Id, id)
+	var customer Customer
+	for rows.Next() {
+		rows.Scan(&customer.Id, &customer.Name, &customer.Dob, &customer.Address.Id, &customer.Address.StreetName, &customer.Address.City, &customer.Address.State, &customer.Address.CusId)
 	}
-}
-
-func UpdateData(db *sql.DB, id int, c Customer) {
-
+	return customer
 }
 
 func PutCustomerHandler(w http.ResponseWriter, r *http.Request) {
-	pathParams, err := strconv.Atoi(strings.Split(r.URL.Path, "/")[2])
-	if err != nil {
-		log.Fatal(err)
+	pathParams, ok := mux.Vars(r)["id"]
+	if !ok {
 		json.NewEncoder(w).Encode(Customer{})
 	}
+	id, err := strconv.Atoi(pathParams)
 	var customer Customer
 	bodyData, _ := ioutil.ReadAll(r.Body)
 	err = json.Unmarshal(bodyData, &customer)
@@ -186,9 +225,10 @@ func PutCustomerHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if customer.Id != 0 || customer.Dob != "" {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte("Id and DOB can't be updated"))
+		json.NewEncoder(w).Encode(Customer{})
 	} else {
-		UpdateData(db, pathParams, customer)
+		customer = UpdateData(db, id, customer)
+		json.NewEncoder(w).Encode(customer)
 	}
 
 }
@@ -208,18 +248,25 @@ func DeleteData(db *sql.DB, id int) Customer {
 		log.Fatal(err)
 		return Customer{}
 	}
-	//fmt.Println("cust is ", c)
+	//fmt.Println("in delete ", c)
 	return c
 }
 
 func DeleteCustomerHandler(w http.ResponseWriter, r *http.Request) {
-	pathParams, err := strconv.Atoi(strings.Split(r.URL.Path, "/")[2])
+	//pathParams, err := strconv.Atoi(strings.Split(r.URL.Path, "/")[2])
+	pathParams, ok := mux.Vars(r)["id"]
 
+	if !ok {
+		json.NewEncoder(w).Encode(Customer{})
+	}
+
+	id, err := strconv.Atoi(pathParams)
 	if err != nil {
 		log.Fatal(err)
 		json.NewEncoder(w).Encode(Customer{})
 	} else {
-		c := DeleteData(db, pathParams)
+		c := DeleteData(db, id)
+		w.WriteHeader(http.StatusNoContent)
 		json.NewEncoder(w).Encode(c)
 	}
 
@@ -236,8 +283,8 @@ func main() {
 		panic(dbErr.Error()) // proper error handling instead of panic in your app
 	}
 	r := mux.NewRouter()
-	r.HandleFunc("/customer", GetCustomersHandler).Methods("GET")
-	r.HandleFunc("/customer/{id}", GetCustomerHandler).Methods("GET")
+	r.HandleFunc("/customer", GetCustomersHandler).Methods(http.MethodGet)
+	r.HandleFunc("/customer/{id}", GetCustomerHandler).Methods(http.MethodGet)
 	r.HandleFunc("/customer/", PostCustomerHandler).Methods("POST")
 	r.HandleFunc("/customer/{id}", PutCustomerHandler).Methods("PUT")
 	r.HandleFunc("/customer/{id}", DeleteCustomerHandler).Methods("DELETE")
