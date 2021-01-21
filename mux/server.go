@@ -50,7 +50,7 @@ func GetCustomersData(db *sql.DB, name string) []Customer {
 
 	for rows.Next() {
 		var c Customer
-		rows.Scan(&c.Id, &c.Name, &c.Dob, &c.Address.Id, &c.Address.StreetName, &c.Address.City, &c.Address.State, &c.Address.CusId)
+		err = rows.Scan(&c.Id, &c.Name, &c.Dob, &c.Address.Id, &c.Address.StreetName, &c.Address.City, &c.Address.State, &c.Address.CusId)
 		customer = append(customer, c)
 	}
 
@@ -67,7 +67,6 @@ func GetCustomersHandler(w http.ResponseWriter, r *http.Request) {
 	} else {
 		C = GetCustomersData(db, "")
 	}
-
 	json.NewEncoder(w).Encode(C)
 
 }
@@ -96,11 +95,15 @@ func GetCustomerHandler(w http.ResponseWriter, r *http.Request) {
 
 	//pathParams, err := strconv.Atoi(strings.Split(r.URL.Path, "/")[2])
 	if err != nil {
-		log.Fatal(err)
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(Customer{})
+	} else {
+		c = GetCustomerData(db, id)
+		if c.Id == 0 {
+			w.WriteHeader(http.StatusNotFound)
+		}
+		json.NewEncoder(w).Encode(c)
 	}
-	c = GetCustomerData(db, id)
-
-	json.NewEncoder(w).Encode(c)
 }
 
 func InsertCustomerData(db *sql.DB, obj Customer) Customer {
@@ -152,18 +155,21 @@ func PostCustomerHandler(w http.ResponseWriter, r *http.Request) {
 	var cust Customer
 	err = json.Unmarshal(body, &cust)
 	if err != nil {
-		log.Fatal(err)
-	}
-	if cust.Name == "" || cust.Dob == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(Customer{})
-	} else if timestamp := DateSubstract(cust.Dob); timestamp/(3600*24*12*30) < 18 {
+		//log.Fatal(err)
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(Customer{})
 	} else {
-		cust = InsertCustomerData(db, cust)
-		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(cust)
+		if cust.Name == "" || cust.Dob == "" || cust.Address.StreetName == "" || cust.Address.City == "" || cust.Address.State == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(Customer{})
+		} else if timestamp := DateSubstract(cust.Dob); timestamp/(3600*24*12*30) < 18 {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(Customer{})
+		} else {
+			cust = InsertCustomerData(db, cust)
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(cust)
+		}
 	}
 }
 
@@ -210,25 +216,28 @@ func UpdateData(db *sql.DB, id int, c Customer) Customer {
 }
 
 func PutCustomerHandler(w http.ResponseWriter, r *http.Request) {
-	pathParams, ok := mux.Vars(r)["id"]
-	if !ok {
-		json.NewEncoder(w).Encode(Customer{})
-	}
+	pathParams := mux.Vars(r)["id"]
 	id, err := strconv.Atoi(pathParams)
-	var customer Customer
-	bodyData, _ := ioutil.ReadAll(r.Body)
-	err = json.Unmarshal(bodyData, &customer)
-
 	if err != nil {
-		log.Fatal(err)
-		json.NewEncoder(w).Encode(Customer{})
-	}
-	if customer.Id != 0 || customer.Dob != "" {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(Customer{})
 	} else {
-		customer = UpdateData(db, id, customer)
-		json.NewEncoder(w).Encode(customer)
+		var customer Customer
+		bodyData, _ := ioutil.ReadAll(r.Body)
+		err = json.Unmarshal(bodyData, &customer)
+
+		if err != nil {
+			//log.Fatal(err)
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(Customer{})
+		}
+		if (customer.Id != 0 || customer.Dob != "") || (customer.Name == "" && customer.Address.Id == 0 && customer.Address.State == "" && customer.Address.City == "" && customer.Address.StreetName == "") {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(Customer{})
+		} else {
+			customer = UpdateData(db, id, customer)
+			json.NewEncoder(w).Encode(customer)
+		}
 	}
 
 }
@@ -254,20 +263,23 @@ func DeleteData(db *sql.DB, id int) Customer {
 
 func DeleteCustomerHandler(w http.ResponseWriter, r *http.Request) {
 	//pathParams, err := strconv.Atoi(strings.Split(r.URL.Path, "/")[2])
-	pathParams, ok := mux.Vars(r)["id"]
-
-	if !ok {
-		json.NewEncoder(w).Encode(Customer{})
-	}
+	pathParams := mux.Vars(r)["id"]
 
 	id, err := strconv.Atoi(pathParams)
 	if err != nil {
-		log.Fatal(err)
+		//log.Fatal(err)
+		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(Customer{})
 	} else {
 		c := DeleteData(db, id)
-		w.WriteHeader(http.StatusNoContent)
-		json.NewEncoder(w).Encode(c)
+		if c.Id == 0 {
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(c)
+		} else {
+			w.WriteHeader(http.StatusOK)
+			//fmt.Println(c)
+			json.NewEncoder(w).Encode(c)
+		}
 	}
 
 }
@@ -285,9 +297,9 @@ func main() {
 	r := mux.NewRouter()
 	r.HandleFunc("/customer", GetCustomersHandler).Methods(http.MethodGet)
 	r.HandleFunc("/customer/{id}", GetCustomerHandler).Methods(http.MethodGet)
-	r.HandleFunc("/customer/", PostCustomerHandler).Methods("POST")
-	r.HandleFunc("/customer/{id}", PutCustomerHandler).Methods("PUT")
-	r.HandleFunc("/customer/{id}", DeleteCustomerHandler).Methods("DELETE")
+	r.HandleFunc("/customer/", PostCustomerHandler).Methods(http.MethodPost)
+	r.HandleFunc("/customer/{id}", PutCustomerHandler).Methods(http.MethodPut)
+	r.HandleFunc("/customer/{id}", DeleteCustomerHandler).Methods(http.MethodDelete)
 
 	// Bind to a port and pass our router in
 	log.Fatal(http.ListenAndServe(":8080", r))
